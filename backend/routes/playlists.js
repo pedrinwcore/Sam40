@@ -64,19 +64,17 @@ router.get('/:id/videos', authMiddleware, async (req, res) => {
 
     const [rows] = await db.execute(
       `SELECT 
-        pv.codigo as id,
-        pv.ordem,
-        pv.video as nome,
-        pv.path_video as url,
-        pv.duracao_segundos as duracao
-       FROM playlists_videos pv
-       WHERE pv.codigo_playlist = ?
-       ORDER BY pv.ordem`,
+        v.id,
+        0 as ordem,
+        v.nome,
+        v.url,
+        v.duracao
+       FROM videos v
+       WHERE v.playlist_id = ?
+       ORDER BY v.id`,
       [playlistId]
     );
 
-    const userEmail = req.user.email.split('@')[0];
-    
     // Ajustar URLs para serem acessíveis
     const videos = rows.map(video => ({
       id: video.id,
@@ -84,7 +82,7 @@ router.get('/:id/videos', authMiddleware, async (req, res) => {
       videos: {
         id: video.id,
         nome: video.nome,
-        url: video.url ? video.url : null,
+        url: video.url,
         duracao: video.duracao
       }
     }));
@@ -123,52 +121,28 @@ router.put('/:id', authMiddleware, async (req, res) => {
 
     // Atualizar vídeos se fornecidos
     if (videos && Array.isArray(videos)) {
-      // Remover vídeos existentes da playlist
+      // Limpar playlist_id dos vídeos atuais
       await db.execute(
-        'DELETE FROM playlists_videos WHERE codigo_playlist = ?',
+        'UPDATE videos SET playlist_id = NULL WHERE playlist_id = ?',
         [playlistId]
       );
 
-      // Inserir novos vídeos
+      // Atualizar vídeos selecionados com o playlist_id
       for (let i = 0; i < videos.length; i++) {
         const video = videos[i];
-        
-        // Buscar dados do vídeo original
-        const [videoData] = await db.execute(
-          'SELECT * FROM playlists_videos WHERE codigo = ?',
-          [video.id]
+        await db.execute(
+          'UPDATE videos SET playlist_id = ? WHERE id = ?',
+          [playlistId, video.id]
         );
-
-        if (videoData.length > 0) {
-          const originalVideo = videoData[0];
-          await db.execute(
-            `INSERT INTO playlists_videos (
-              codigo_playlist, path_video, video, width, height,
-              bitrate, duracao, duracao_segundos, tipo, ordem
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              playlistId,
-              originalVideo.path_video,
-              originalVideo.video,
-              originalVideo.width,
-              originalVideo.height,
-              originalVideo.bitrate,
-              originalVideo.duracao,
-              originalVideo.duracao_segundos,
-              originalVideo.tipo,
-              i
-            ]
-          );
-        }
       }
 
       // Atualizar estatísticas da playlist
       const [stats] = await db.execute(
         `SELECT 
           COUNT(*) as total_videos,
-          SUM(duracao_segundos) as duracao_total
-         FROM playlists_videos 
-         WHERE codigo_playlist = ?`,
+          SUM(duracao) as duracao_total
+         FROM videos 
+         WHERE playlist_id = ?`,
         [playlistId]
       );
 
@@ -216,9 +190,9 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       });
     }
 
-    // Remover vídeos da playlist
+    // Limpar playlist_id dos vídeos
     await db.execute(
-      'DELETE FROM playlists_videos WHERE codigo_playlist = ?',
+      'UPDATE videos SET playlist_id = NULL WHERE playlist_id = ?',
       [playlistId]
     );
 

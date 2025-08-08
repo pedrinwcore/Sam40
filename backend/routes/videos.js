@@ -67,6 +67,7 @@ router.get('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'folder_id é obrigatório' });
     }
 
+    // Buscar dados da pasta
     const [folderRows] = await db.execute(
       'SELECT identificacao FROM streamings WHERE codigo = ? AND codigo_cliente = ?',
       [folderId, userId]
@@ -77,34 +78,51 @@ router.get('/', authMiddleware, async (req, res) => {
 
     const folderName = folderRows[0].identificacao;
     const userLogin = req.user.email.split('@')[0];
-    const folderPath = `/${userLogin}/${folderName}/`;
 
+    // Buscar vídeos na tabela videos usando pasta
     const [rows] = await db.execute(
       `SELECT 
-        codigo as id,
-        video as nome,
-        path_video as url,
-        duracao_segundos as duracao,
-        tamanho_arquivo as tamanho
-       FROM playlists_videos 
-       WHERE path_video LIKE ?
-       ORDER BY codigo`,
-      [`%${folderPath}%`]
+        id,
+        nome,
+        url,
+        caminho,
+        duracao,
+        tamanho_arquivo as tamanho,
+        bitrate_video,
+        formato_original,
+        is_mp4,
+        compativel
+       FROM videos 
+       WHERE codigo_cliente = ? AND pasta = ?
+       ORDER BY id DESC`,
+      [userId, folderId]
     );
 
-    console.log(`📁 Buscando vídeos na pasta: ${folderPath}`);
+    console.log(`📁 Buscando vídeos na pasta: ${folderName} (ID: ${folderId})`);
     console.log(`📊 Encontrados ${rows.length} vídeos no banco`);
 
     const videos = rows.map(video => {
-      // Construir URL correta baseada no caminho do banco
-      let url = video.url;
-
-      // Se o path_video já contém o caminho completo do servidor, extrair apenas a parte relativa
+      // Construir URL correta baseada no caminho
+      let url = video.url || video.caminho;
+      
+      // Se não tem URL, construir baseado no caminho
+      if (!url && video.caminho) {
+        url = video.caminho;
+      }
+      
+      // Se ainda não tem URL, construir padrão
+      if (!url) {
+        url = `${userLogin}/${folderName}/${video.nome}`;
+      }
+      
+      // Garantir que a URL está no formato correto
       if (url.includes('/usr/local/WowzaStreamingEngine/content/')) {
-        const relativePath = url.replace('/usr/local/WowzaStreamingEngine/content/', '');
-        url = relativePath;
-      } else if (url.startsWith('/')) {
-        url = url.substring(1); // Remove barra inicial
+        url = url.replace('/usr/local/WowzaStreamingEngine/content/', '');
+      }
+      
+      // Remover barra inicial se existir
+      if (url.startsWith('/')) {
+        url = url.substring(1);
       }
 
       console.log(`🎥 Vídeo: ${video.nome} -> URL: ${url}`);
@@ -115,12 +133,16 @@ router.get('/', authMiddleware, async (req, res) => {
         url,
         duracao: video.duracao,
         tamanho: video.tamanho,
+        bitrate_video: video.bitrate_video,
+        formato_original: video.formato_original,
+        is_mp4: video.is_mp4,
+        compativel: video.compativel,
         folder: folderName,
         user: userLogin
       };
     });
 
-    console.log(`✅ Retornando ${videos.length} vídeos processados`);
+    console.log(`✅ Retornando ${videos.length} vídeos com informações de compatibilidade`);
     res.json(videos);
   } catch (err) {
     console.error('Erro ao buscar vídeos:', err);
@@ -214,12 +236,24 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     // Nome do vídeo para salvar no banco
     const videoTitle = req.file.originalname;
 
+    // Salvar na tabela videos
     const [result] = await db.execute(
-      `INSERT INTO playlists_videos (
-        codigo_playlist, path_video, video, width, height,
-        bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
-      ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
-      [relativePath, videoTitle, formatDuration(duracao), duracao, tamanho]
+      `INSERT INTO videos (
+        nome, descricao, url, caminho, duracao, tamanho_arquivo,
+        codigo_cliente, pasta, bitrate_video, formato_original,
+        largura, altura, is_mp4, compativel
+      ) VALUES (?, '', ?, ?, ?, ?, ?, ?, '2500', ?, '1920', '1080', ?, 'sim')`,
+      [
+        videoTitle,
+        relativePath,
+        remotePath,
+        duracao,
+        tamanho,
+        userId,
+        folderId,
+        fileExtension.substring(1),
+        fileExtension === '.mp4' ? 1 : 0
+      ]
     );
 
     await db.execute(
@@ -353,33 +387,31 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     const userLogin = req.user.email.split('@')[0];
 
-    // Buscar dados da playlist e vídeo associado
+    // Buscar dados do vídeo
     const [videoRows] = await db.execute(
-      'SELECT path_video, video, tamanho_arquivo, codigo_video FROM playlists_videos WHERE codigo = ?',
-      [videoId]
+      'SELECT caminho, nome, tamanho_arquivo FROM videos WHERE id = ? AND codigo_cliente = ?',
+      [videoId, userId]
     );
     if (videoRows.length === 0) {
-      return res.status(404).json({ error: 'Vídeo não encontrado na playlist' });
+      return res.status(404).json({ error: 'Vídeo não encontrado' });
     }
 
-    const { path_video, tamanho_arquivo, codigo_video } = videoRows[0];
+    const { caminho, tamanho_arquivo } = videoRows[0];
 
-    if (!path_video.includes(`/${userLogin}/`)) {
+    if (!caminho.includes(`/${userLogin}/`)) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
     // Buscar servidor para execução via SSH
     const [serverRows] = await db.execute(
-      `SELECT s.codigo_servidor 
-       FROM streamings s 
-       WHERE s.codigo_cliente = ? 
-       LIMIT 1`,
+      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
       [userId]
     );
     const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
 
     let fileSize = tamanho_arquivo || 0;
-    const remotePath = `/usr/local/WowzaStreamingEngine/content${path_video}`;
+    const remotePath = caminho.startsWith('/usr/local/WowzaStreamingEngine/content') ? 
+      caminho : `/usr/local/WowzaStreamingEngine/content/${caminho}`;
 
     // Verificar tamanho real do arquivo via SSH, se necessário
     if (!fileSize) {
@@ -399,37 +431,19 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       console.warn('Erro ao deletar arquivo remoto:', err.message);
     }
 
-    // Remover entradas do banco de dados
-    await db.execute('DELETE FROM playlists_videos WHERE codigo = ?', [videoId]);
-
-    // Verificar se o vídeo ainda está em outras playlists
-    const [remainingRefs] = await db.execute(
-      'SELECT COUNT(*) as total FROM playlists_videos WHERE codigo_video = ?',
-      [codigo_video]
+    // Remover vídeo da tabela videos
+    await db.execute('DELETE FROM videos WHERE id = ?', [videoId]);
+    
+    // Calcular espaço liberado
+    const spaceMB = Math.ceil((fileSize) / (1024 * 1024));
+    
+    // Atualizar espaço usado na pasta
+    await db.execute(
+      'UPDATE streamings SET espaco_usado = GREATEST(espaco_usado - ?, 0) WHERE codigo = ?',
+      [spaceMB, req.query.folder_id || 1]
     );
-
-    if (remainingRefs[0].total === 0) {
-      // O vídeo não está mais em nenhuma playlist, remover da tabela principal
-      const [videoInfoRows] = await db.execute(
-        'SELECT caminho, tamanho_arquivo FROM videos WHERE codigo = ?',
-        [codigo_video]
-      );
-
-      if (videoInfoRows.length > 0) {
-        const { caminho, tamanho_arquivo } = videoInfoRows[0];
-        const filePath = path.resolve(__dirname, '..', 'videos', caminho);
-        const spaceMB = Math.ceil((tamanho_arquivo || fileSize) / (1024 * 1024));
-
-        // Deletar arquivo local se existir
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-          console.log(`🗑️ Arquivo local deletado: ${filePath}`);
-        }
-
-        await db.execute('DELETE FROM videos WHERE codigo = ?', [codigo_video]);
-        console.log(`📊 Espaço liberado: ${spaceMB}MB`);
-      }
-    }
+    
+    console.log(`📊 Espaço liberado: ${spaceMB}MB`);
 
     return res.json({ success: true, message: 'Vídeo removido com sucesso' });
   } catch (err) {

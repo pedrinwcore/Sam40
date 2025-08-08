@@ -164,31 +164,50 @@ class VideoSSHManager {
             
             for (const video of videos) {
                 try {
-                    // Verificar se vídeo já existe no banco
+                    // Verificar se vídeo já existe na tabela videos
                     const [existingRows] = await db.execute(
-                        'SELECT codigo FROM playlists_videos WHERE path_video = ?',
+                        'SELECT id FROM videos WHERE caminho = ?',
                         [video.fullPath]
                     );
                     
                     if (existingRows.length === 0) {
-                        // Inserir novo vídeo no banco
+                        // Buscar código do cliente baseado no userLogin
+                        const [clienteRows] = await db.execute(
+                            'SELECT codigo_cliente FROM streamings WHERE login = ? OR email LIKE ? LIMIT 1',
+                            [userLogin, `${userLogin}@%`]
+                        );
+                        
+                        const codigoCliente = clienteRows.length > 0 ? clienteRows[0].codigo_cliente : null;
+                        
+                        // Buscar ID da pasta baseado no caminho
+                        const [pastaRows] = await db.execute(
+                            'SELECT codigo FROM streamings WHERE identificacao = ? AND codigo_cliente = ? LIMIT 1',
+                            [video.folder === 'root' ? userLogin : video.folder, codigoCliente]
+                        );
+                        
+                        const pastaId = pastaRows.length > 0 ? pastaRows[0].codigo : null;
+                        
+                        // Inserir novo vídeo na tabela videos
                         const duracao = this.formatDuration(video.duration);
+                        const relativePath = video.fullPath.replace('/usr/local/WowzaStreamingEngine/content/', '');
                         
                         await db.execute(
-                            `INSERT INTO playlists_videos (
-                                codigo_playlist, path_video, video, width, height,
-                                bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo,
-                                bitrate_video, formato_original, bitrate_original
-                            ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?, ?, ?, ?)`,
+                            `INSERT INTO videos (
+                                nome, url, caminho, duracao, tamanho_arquivo,
+                                codigo_cliente, pasta, bitrate_video, formato_original,
+                                largura, altura, is_mp4, compativel
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '1920', '1080', ?, 'sim')`,
                             [
-                                video.fullPath,
                                 video.nome,
-                                duracao,
+                                relativePath,
+                                video.fullPath,
                                 video.duration,
                                 video.size,
+                                codigoCliente,
+                                pastaId,
                                 video.bitrate_video || 0,
                                 video.formato_original || 'unknown',
-                                video.bitrate_original || 0
+                                video.is_mp4 ? 1 : 0
                             ]
                         );
                         
@@ -196,7 +215,7 @@ class VideoSSHManager {
                     } else {
                         // Atualizar informações se necessário
                         await db.execute(
-                            'UPDATE playlists_videos SET tamanho_arquivo = ?, duracao_segundos = ? WHERE path_video = ?',
+                            'UPDATE videos SET tamanho_arquivo = ?, duracao = ? WHERE caminho = ?',
                             [video.size, video.duration, video.fullPath]
                         );
                     }
@@ -224,12 +243,12 @@ class VideoSSHManager {
             );
             
             for (const folder of folderRows) {
-                // Calcular espaço usado baseado nos vídeos no banco
+                // Calcular espaço usado baseado nos vídeos na tabela videos
                 const [spaceRows] = await db.execute(
                     `SELECT COALESCE(SUM(CEIL(tamanho_arquivo / (1024 * 1024))), 0) as used_mb
-                     FROM playlists_videos 
-                     WHERE path_video LIKE ?`,
-                    [`%/${userLogin}/${folder.identificacao}/%`]
+                     FROM videos 
+                     WHERE pasta = ? AND codigo_cliente = ?`,
+                    [folder.codigo, folder.codigo_cliente]
                 );
                 
                 const usedMB = spaceRows[0]?.used_mb || 0;

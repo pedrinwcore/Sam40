@@ -290,7 +290,7 @@ router.get('/stream/:videoId', async (req, res) => {
       );
     } else {
       [userRows] = await db.execute(
-        'SELECT codigo, identificacao as nome, email FROM streamings WHERE codigo = ? AND status = 1',
+        'SELECT codigo_cliente as codigo, identificacao as nome, email FROM streamings WHERE codigo_cliente = ? AND status = 1 LIMIT 1',
         [decoded.userId]
       );
     }
@@ -569,7 +569,7 @@ router.delete('/:videoId', authMiddleware, async (req, res) => {
       try {
         // Buscar vídeo no banco para obter tamanho exato
         const [videoRows] = await db.execute(
-          'SELECT tamanho_arquivo FROM playlists_videos WHERE path_video = ?',
+          'SELECT tamanho_arquivo FROM videos WHERE caminho = ?',
           [remotePath]
         );
         
@@ -578,7 +578,7 @@ router.delete('/:videoId', authMiddleware, async (req, res) => {
         }
         
         await db.execute(
-          'DELETE FROM playlists_videos WHERE path_video = ?',
+          'DELETE FROM videos WHERE caminho = ?',
           [remotePath]
         );
         
@@ -659,27 +659,33 @@ router.post('/sync-database', authMiddleware, async (req, res) => {
 
     // Limpar vídeos antigos desta pasta do banco
     await db.execute(
-      'DELETE FROM playlists_videos WHERE path_video LIKE ?',
-      [`%/${userLogin}/${folderName}/%`]
+      'DELETE FROM videos WHERE pasta = ? AND codigo_cliente = ?',
+      [folderId, decoded.userId]
     );
 
-    // Inserir vídeos atualizados no banco
+    // Inserir vídeos atualizados na tabela videos
     let totalSize = 0;
     for (const video of videos) {
       try {
-        const duracao = VideoSSHManager.formatDuration(video.duration);
+        const relativePath = video.fullPath.replace('/usr/local/WowzaStreamingEngine/content/', '');
         
         await db.execute(
-          `INSERT INTO playlists_videos (
-            codigo_playlist, path_video, video, width, height,
-            bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
-          ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
+          `INSERT INTO videos (
+            nome, url, caminho, duracao, tamanho_arquivo,
+            codigo_cliente, pasta, bitrate_video, formato_original,
+            largura, altura, is_mp4, compativel
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '1920', '1080', ?, 'sim')`,
           [
-            video.fullPath,
             video.nome,
-            duracao,
+            relativePath,
+            video.fullPath,
             video.duration,
-            video.size
+            video.size,
+            decoded.userId,
+            folderId,
+            video.bitrate_video || 0,
+            video.formato_original || 'unknown',
+            video.is_mp4 ? 1 : 0
           ]
         );
         
@@ -728,7 +734,30 @@ router.put('/:videoId/rename', authMiddleware, async (req, res) => {
 
     // Para renomear, precisamos buscar o vídeo no banco primeiro
     const [videoRows] = await db.execute(
-      'SELECT path_video, video FROM playlists_videos WHERE codigo = ?',
+      'SELECT caminho, nome FROM videos WHERE id = ? AND codigo_cliente = ?',
+      [videoId, userId]
+    );
+
+    if (videoRows.length === 0) {
+      return res.status(404).json({ error: 'Vídeo não encontrado' });
+    }
+
+    const video = videoRows[0];
+    let remotePath = video.caminho;
+
+    // Se o caminho não contém o caminho completo do servidor, construir
+    if (!remotePath.startsWith('/usr/local/WowzaStreamingEngine/content/')) {
+      remotePath = `/usr/local/WowzaStreamingEngine/content/${remotePath}`;
+    }
+
+    // Verificar se o caminho pertence ao usuário
+    if (!remotePath.includes(`/${userLogin}/`)) {
+      return res.status(403).json({ error: 'Acesso negado ao vídeo' });
+    }
+
+    // Buscar servidor do usuário
+    const [serverRows] = await db.execute(
+      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
       [videoId]
     );
 
@@ -769,7 +798,7 @@ router.put('/:videoId/rename', authMiddleware, async (req, res) => {
 
     // Atualizar nome no banco de dados
     await db.execute(
-      'UPDATE playlists_videos SET video = ?, path_video = ? WHERE codigo = ?',
+      'UPDATE videos SET nome = ?, caminho = ? WHERE id = ?',
       [novo_nome, newRemotePath, videoId]
     );
 
@@ -835,7 +864,7 @@ router.put('/rename-by-path/:videoId', authMiddleware, async (req, res) => {
 
     // Atualizar no banco de dados também
     await db.execute(
-      'UPDATE playlists_videos SET video = ?, path_video = ? WHERE path_video = ?',
+      'UPDATE videos SET nome = ?, caminho = ? WHERE caminho = ?',
       [novo_nome, newRemotePath, remotePath]
     );
 
@@ -919,9 +948,9 @@ router.get('/folders/:folderId/usage', authMiddleware, async (req, res) => {
     // Recalcular uso real baseado nos vídeos no banco
     const [videoUsageRows] = await db.execute(
       `SELECT COALESCE(SUM(CEIL(tamanho_arquivo / (1024 * 1024))), 0) as real_used_mb
-       FROM playlists_videos 
-       WHERE path_video LIKE ?`,
-      [`%/${folder.identificacao}/%`]
+       FROM videos 
+       WHERE pasta = ? AND codigo_cliente = ?`,
+      [folderId, userId]
     );
     
     const realUsedMB = videoUsageRows[0]?.real_used_mb || 0;
