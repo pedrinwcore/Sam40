@@ -15,6 +15,17 @@ interface Video {
   url: string;
   duracao?: number;
   tamanho?: number;
+  bitrate_video?: number;
+  formato_original?: string;
+  largura?: number;
+  altura?: number;
+  codec_video?: string;
+  is_mp4?: boolean;
+  compativel?: boolean;
+  motivos_incompatibilidade?: string[];
+  needs_conversion?: boolean;
+  can_use_in_playlist?: boolean;
+  compatibility_reasons?: string[];
   folder?: string;
   user?: string;
 }
@@ -513,7 +524,9 @@ const GerenciarVideos: React.FC = () => {
                                 <div className="flex items-center space-x-4 flex-1">
                                   {/* Thumbnail simples */}
                                   <div className="w-20 h-12 bg-gray-200 rounded overflow-hidden flex-shrink-0 flex items-center justify-center">
-                                    <Video className="h-6 w-6 text-gray-400" />
+                                    <Video className={`h-6 w-6 ${
+                                      video.compativel === false ? 'text-red-400' : 'text-gray-400'
+                                    }`} />
                                   </div>
                                   
                                   {/* Informações do vídeo */}
@@ -551,8 +564,15 @@ const GerenciarVideos: React.FC = () => {
                                       </div>
                                     ) : (
                                       <>
-                                        <h4 className="font-medium text-gray-900 truncate" title={video.nome}>
+                                        <h4 className={`font-medium truncate ${
+                                          video.compativel === false ? 'text-red-700' : 'text-gray-900'
+                                        }`} title={video.nome}>
                                           {video.nome}
+                                          {video.compativel === false && (
+                                            <span className="ml-2 text-xs bg-red-100 text-red-800 px-2 py-1 rounded">
+                                              INCOMPATÍVEL
+                                            </span>
+                                          )}
                                         </h4>
                                         <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
                                           {video.duracao && (
@@ -561,10 +581,36 @@ const GerenciarVideos: React.FC = () => {
                                           {video.tamanho && (
                                             <span>💾 {formatFileSize(video.tamanho)}</span>
                                           )}
-                                          {video.bitrate_original && (
-                                            <span>📊 {video.bitrate_original} kbps</span>
+                                          {video.bitrate_video && (
+                                            <span className={`📊 ${
+                                              video.bitrate_video > (user?.bitrate || 2500) ? 'text-red-600 font-medium' : ''
+                                            }`}>
+                                              📊 {video.bitrate_video} kbps
+                                            </span>
+                                          )}
+                                          {video.formato_original && (
+                                            <span className={`${
+                                              video.is_mp4 ? 'text-green-600' : 'text-yellow-600'
+                                            }`}>
+                                              🎬 {video.formato_original.toUpperCase()}
+                                            </span>
                                           )}
                                         </div>
+                                        {video.compativel === false && video.motivos_incompatibilidade && (
+                                          <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded-md">
+                                            <p className="text-xs text-red-800 font-medium mb-1">
+                                              ⚠️ Não pode ser usado em playlists:
+                                            </p>
+                                            <ul className="text-xs text-red-700 space-y-1">
+                                              {video.motivos_incompatibilidade.map((motivo, index) => (
+                                                <li key={index}>• {motivo}</li>
+                                              ))}
+                                            </ul>
+                                            <p className="text-xs text-red-600 mt-2 font-medium">
+                                              💡 Use a página "Conversão de Vídeos" para tornar este vídeo compatível
+                                            </p>
+                                          </div>
+                                        )}
                                       </>
                                     )}
                                   </div>
@@ -607,7 +653,7 @@ const GerenciarVideos: React.FC = () => {
                                     
                                     <button
                                       onClick={() => handleDeleteVideo(video.id, video.nome, folder.id)}
-                                      className="text-red-600 hover:text-red-800 p-2 rounded-md hover:bg-red-50 transition-colors"
+                                      className="text-red-600 hover:text-red-800 p-1"
                                       title="Excluir"
                                     >
                                       <Trash2 className="h-4 w-4" />
@@ -746,10 +792,50 @@ const GerenciarVideos: React.FC = () => {
               <li>• Clique na seta ao lado da pasta para expandir e ver os vídeos</li>
               <li>• Use os botões de ação para reproduzir, editar, visualizar ou excluir vídeos</li>
               <li>• Envie vídeos nos formatos: MP4, AVI, MOV, WMV, FLV, WebM, MKV, etc.</li>
-              <li>• Vídeos são automaticamente convertidos para MP4 se necessário</li>
+              <li>• <strong>Vídeos incompatíveis:</strong> Aparecem em vermelho e não podem ser usados em playlists</li>
+              <li>• <strong>Formatos aceitos:</strong> Apenas MP4 com bitrate dentro do limite do plano</li>
+              <li>• <strong>Conversão:</strong> Use a página "Conversão de Vídeos" para tornar vídeos compatíveis</li>
               <li>• Use "Sincronizar" para atualizar a lista com vídeos enviados via FTP</li>
               <li>• Monitore o uso de espaço para não exceder seu plano</li>
             </ul>
+          </div>
+        </div>
+      </div>
+      
+      {/* Informações sobre Compatibilidade */}
+      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
+        <div className="flex items-start">
+          <AlertCircle className="h-5 w-5 text-yellow-600 mr-3 mt-0.5" />
+          <div>
+            <h3 className="text-yellow-900 font-medium mb-2">Sistema de Compatibilidade</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-yellow-800 text-sm">
+              <div>
+                <h4 className="font-medium mb-2">✅ Vídeos Compatíveis:</h4>
+                <ul className="space-y-1">
+                  <li>• Formato MP4</li>
+                  <li>• Bitrate ≤ {user?.bitrate || 2500} kbps</li>
+                  <li>• Podem ser usados em playlists</li>
+                  <li>• Reprodução direta</li>
+                </ul>
+              </div>
+              <div>
+                <h4 className="font-medium mb-2">❌ Vídeos Incompatíveis:</h4>
+                <ul className="space-y-1">
+                  <li>• Formatos diferentes de MP4</li>
+                  <li>• Bitrate > {user?.bitrate || 2500} kbps</li>
+                  <li>• Aparecem em vermelho</li>
+                  <li>• Precisam de conversão</li>
+                </ul>
+              </div>
+            </div>
+            <div className="mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-md">
+              <p className="text-yellow-900 text-sm font-medium">
+                💡 Para converter vídeos incompatíveis, acesse: 
+                <Link to="/dashboard/conversao-videos" className="text-blue-600 hover:text-blue-800 underline ml-1">
+                  Conversão de Vídeos
+                </Link>
+              </p>
+            </div>
           </div>
         </div>
       </div>

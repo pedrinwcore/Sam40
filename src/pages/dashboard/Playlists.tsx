@@ -40,6 +40,12 @@ interface Video {
   url?: string;
   duracao?: number;
   tamanho?: number;
+  bitrate_video?: number;
+  formato_original?: string;
+  is_mp4?: boolean;
+  compativel?: boolean;
+  motivos_incompatibilidade?: string[];
+  can_use_in_playlist?: boolean;
 }
 
 const Playlists: React.FC = () => {
@@ -427,17 +433,54 @@ const Playlists: React.FC = () => {
       transition,
       cursor: 'grab',
     };
+    
+    const canAddToPlaylist = video.compativel !== false;
+    
     return (
       <li
         ref={setNodeRef}
         style={style}
         {...attributes}
         {...listeners}
-        className="p-1 text-sm hover:bg-zinc-100 rounded flex justify-between items-center cursor-pointer"
+        className={`p-2 text-sm rounded flex justify-between items-center ${
+          canAddToPlaylist ? 'hover:bg-zinc-100 cursor-pointer' : 'bg-red-50 border border-red-200 cursor-not-allowed opacity-75'
+        }`}
       >
-        <span onClick={() => setSelectedVideos((prev) => [...prev, video])}>
-          {video.nome}
-        </span>
+        <div 
+          className="flex-1"
+          onClick={() => canAddToPlaylist && setSelectedVideos((prev) => [...prev, video])}
+        >
+          <div className={`font-medium ${canAddToPlaylist ? 'text-gray-900' : 'text-red-700'}`}>
+            {video.nome}
+            {!canAddToPlaylist && (
+              <span className="ml-2 text-xs bg-red-100 text-red-800 px-2 py-1 rounded">
+                INCOMPATÍVEL
+              </span>
+            )}
+          </div>
+          <div className="flex items-center space-x-3 text-xs text-gray-600 mt-1">
+            {video.duracao && (
+              <span>⏱️ {formatDuration(video.duracao)}</span>
+            )}
+            {video.bitrate_video && (
+              <span className={video.bitrate_video > 2500 ? 'text-red-600 font-medium' : ''}>
+                📊 {video.bitrate_video} kbps
+              </span>
+            )}
+            {video.formato_original && (
+              <span className={video.is_mp4 ? 'text-green-600' : 'text-yellow-600'}>
+                🎬 {video.formato_original.toUpperCase()}
+              </span>
+            )}
+          </div>
+          {!canAddToPlaylist && video.motivos_incompatibilidade && (
+            <div className="mt-1 text-xs text-red-700">
+              {video.motivos_incompatibilidade.map((motivo, idx) => (
+                <div key={idx}>• {motivo}</div>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={(e) => {
@@ -509,7 +552,19 @@ const Playlists: React.FC = () => {
 
   const adicionarTodosDaPasta = (folderId: number) => {
     const videos = videosByFolder[folderId] || [];
-    setSelectedVideos(prev => [...prev, ...videos]);
+    // Filtrar apenas vídeos compatíveis
+    const videosCompativeis = videos.filter(video => video.compativel !== false);
+    
+    if (videosCompativeis.length === 0) {
+      toast.warning('Nenhum vídeo compatível encontrado nesta pasta');
+      return;
+    }
+    
+    if (videosCompativeis.length < videos.length) {
+      toast.warning(`${videosCompativeis.length} de ${videos.length} vídeos adicionados (apenas compatíveis)`);
+    }
+    
+    setSelectedVideos(prev => [...prev, ...videosCompativeis]);
   };
 
   const removerTodos = () => setSelectedVideos([]);
@@ -847,7 +902,7 @@ const Playlists: React.FC = () => {
                             items={videosByFolder[folder.id]?.map(v => `available-${v.id}`) || []}
                             strategy={verticalListSortingStrategy}
                           >
-                            <ul>
+                            <ul className="space-y-1">
                               {(videosByFolder[folder.id] || []).map((video, index) => (
                                 <AvailableVideo key={video.id} video={video} index={index} />
                               ))}
@@ -878,13 +933,23 @@ const Playlists: React.FC = () => {
                       items={selectedVideos.map((_, i) => `selected-${i}`)}
                       strategy={verticalListSortingStrategy}
                     >
-                      <ul className="flex-grow overflow-y-auto">
+                      <ul className="flex-grow overflow-y-auto space-y-1">
                         {selectedVideos.map((video, index) => (
                           <SelectedVideo key={`${video.id}-${index}`} video={video} index={index} />
                         ))}
                       </ul>
                     </SortableContext>
                   </DndContext>
+                  
+                  {selectedVideos.length === 0 && (
+                    <div className="flex-grow flex items-center justify-center text-gray-500 text-sm">
+                      <div className="text-center">
+                        <Video className="h-8 w-8 mx-auto mb-2 text-gray-300" />
+                        <p>Arraste vídeos compatíveis aqui</p>
+                        <p className="text-xs mt-1">Apenas vídeos MP4 com bitrate adequado</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1018,6 +1083,22 @@ const Playlists: React.FC = () => {
         mensagem={modalConfirmacao.mensagem}
         detalhes={modalConfirmacao.detalhes}
       />
+      
+      {/* Aviso sobre compatibilidade */}
+      <div className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="flex items-start">
+          <AlertCircle className="h-5 w-5 text-red-600 mr-3 mt-0.5" />
+          <div>
+            <h3 className="text-red-900 font-medium mb-2">⚠️ Importante sobre Compatibilidade</h3>
+            <ul className="text-red-800 text-sm space-y-1">
+              <li>• <strong>Apenas vídeos compatíveis</strong> podem ser adicionados às playlists</li>
+              <li>• <strong>Vídeos incompatíveis</strong> aparecem em vermelho e não podem ser arrastados</li>
+              <li>• <strong>Requisitos:</strong> Formato MP4 + Bitrate ≤ {user?.bitrate || 2500} kbps</li>
+              <li>• <strong>Solução:</strong> Use a página "Conversão de Vídeos" para tornar vídeos compatíveis</li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };

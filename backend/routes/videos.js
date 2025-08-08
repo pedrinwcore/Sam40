@@ -5,7 +5,7 @@ const fs = require('fs').promises;
 const db = require('../config/database');
 const authMiddleware = require('../middlewares/authMiddleware');
 const SSHManager = require('../config/SSHManager');
-const wowzaService = require('../config/WowzaStreamingService');
+const ffmpeg = require('fluent-ffmpeg');
 
 const router = express.Router();
 
@@ -59,6 +59,59 @@ const upload = multer({
   }
 });
 
+// Função para obter informações do vídeo usando ffprobe
+async function getVideoInfo(filePath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        console.error('Erro ao obter informações do vídeo:', err);
+        resolve({
+          duration: 0,
+          bitrate: 0,
+          width: 0,
+          height: 0,
+          format: 'unknown',
+          codec: 'unknown'
+        });
+        return;
+      }
+
+      const videoStream = metadata.streams.find(stream => stream.codec_type === 'video');
+      const audioStream = metadata.streams.find(stream => stream.codec_type === 'audio');
+      
+      const duration = Math.floor(metadata.format.duration || 0);
+      const bitrate = Math.floor((metadata.format.bit_rate || 0) / 1000); // Converter para kbps
+      const width = videoStream?.width || 0;
+      const height = videoStream?.height || 0;
+      const format = metadata.format.format_name || 'unknown';
+      const codec = videoStream?.codec_name || 'unknown';
+
+      resolve({
+        duration,
+        bitrate,
+        width,
+        height,
+        format,
+        codec
+      });
+    });
+  });
+}
+
+// Função para verificar se vídeo é compatível
+function isVideoCompatible(fileExtension, bitrate, userBitrateLimit) {
+  const isMP4 = fileExtension === '.mp4';
+  const bitrateOk = bitrate <= userBitrateLimit;
+  
+  return {
+    isCompatible: isMP4 && bitrateOk,
+    needsConversion: !isMP4 || !bitrateOk,
+    reasons: [
+      ...(!isMP4 ? ['Formato não é MP4'] : []),
+      ...(!bitrateOk ? [`Bitrate ${bitrate} kbps excede limite de ${userBitrateLimit} kbps`] : [])
+    ]
+  };
+}
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -77,50 +130,68 @@ router.get('/', authMiddleware, async (req, res) => {
 
     const folderName = folderRows[0].identificacao;
     const userLogin = req.user.email.split('@')[0];
-    const folderPath = `/${userLogin}/${folderName}/`;
 
+    const userBitrateLimit = req.user.bitrate || 2500;
+
+    // Buscar vídeos da tabela videos que pertencem ao usuário e pasta
     const [rows] = await db.execute(
       `SELECT 
-        codigo as id,
-        video as nome,
-        path_video as url,
-        duracao_segundos as duracao,
-        tamanho_arquivo as tamanho
-       FROM playlists_videos 
-       WHERE path_video LIKE ?
-       ORDER BY codigo`,
-      [`%${folderPath}%`]
+        v.codigo as id,
+        v.nome,
+        v.caminho as url,
+        v.duracao_segundos as duracao,
+        v.tamanho_arquivo as tamanho,
+        v.bitrate_video,
+        v.formato_original,
+        v.largura,
+        v.altura,
+        v.codec_video,
+        v.is_mp4,
+        v.compativel,
+        v.motivos_incompatibilidade,
+        v.data_upload
+       FROM videos v
+       WHERE v.codigo_cliente = ? AND v.pasta = ?
+       ORDER BY v.data_upload DESC`,
+      [userId, folderName]
     );
 
-    console.log(`📁 Buscando vídeos na pasta: ${folderPath}`);
+    console.log(`📁 Buscando vídeos na pasta: ${folderName}`);
     console.log(`📊 Encontrados ${rows.length} vídeos no banco`);
-
     const videos = rows.map(video => {
-      // Construir URL correta baseada no caminho do banco
-      let url = video.url;
-
-      // Se o path_video já contém o caminho completo do servidor, extrair apenas a parte relativa
-      if (url.includes('/usr/local/WowzaStreamingEngine/content/')) {
-        const relativePath = url.replace('/usr/local/WowzaStreamingEngine/content/', '');
-        url = relativePath;
-      } else if (url.startsWith('/')) {
-        url = url.substring(1); // Remove barra inicial
-      }
-
-      console.log(`🎥 Vídeo: ${video.nome} -> URL: ${url}`);
+      // Verificar compatibilidade
+      const compatibility = isVideoCompatible(
+        path.extname(video.nome).toLowerCase(),
+        video.bitrate_video || 0,
+        userBitrateLimit
+      );
 
       return {
         id: video.id,
         nome: video.nome,
-        url,
+        url: video.url,
         duracao: video.duracao,
         tamanho: video.tamanho,
+        bitrate_video: video.bitrate_video,
+        formato_original: video.formato_original,
+        largura: video.largura,
+        altura: video.altura,
+        codec_video: video.codec_video,
+        is_mp4: video.is_mp4,
+        compativel: video.compativel,
+        motivos_incompatibilidade: video.motivos_incompatibilidade ? 
+          JSON.parse(video.motivos_incompatibilidade) : [],
+        data_upload: video.data_upload,
         folder: folderName,
-        user: userLogin
+        user: userLogin,
+        // Informações de compatibilidade calculadas
+        can_use_in_playlist: compatibility.isCompatible,
+        needs_conversion: compatibility.needsConversion,
+        compatibility_reasons: compatibility.reasons
       };
     });
 
-    console.log(`✅ Retornando ${videos.length} vídeos processados`);
+    console.log(`✅ Retornando ${videos.length} vídeos com informações de compatibilidade`);
     res.json(videos);
   } catch (err) {
     console.error('Erro ao buscar vídeos:', err);
@@ -137,6 +208,7 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
     const userId = req.user.id;
     const userLogin = req.user.email.split('@')[0];
     const folderId = req.query.folder_id || 'default';
+    const userBitrateLimit = req.user.bitrate || 2500;
 
     console.log(`📤 Upload iniciado - Usuário: ${userLogin}, Pasta: ${folderId}, Arquivo: ${req.file.originalname}`);
     console.log(`📋 Tipo MIME: ${req.file.mimetype}, Tamanho: ${req.file.size} bytes`);
@@ -157,9 +229,20 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
       });
     }
 
-    const duracao = parseInt(req.body.duracao) || 0;
     const tamanho = parseInt(req.body.tamanho) || req.file.size;
 
+    // Obter informações detalhadas do vídeo
+    console.log(`🔍 Analisando vídeo: ${req.file.originalname}`);
+    const videoInfo = await getVideoInfo(req.file.path);
+    
+    console.log(`📊 Informações do vídeo:`, {
+      duration: videoInfo.duration,
+      bitrate: videoInfo.bitrate,
+      width: videoInfo.width,
+      height: videoInfo.height,
+      format: videoInfo.format,
+      codec: videoInfo.codec
+    });
     const [userRows] = await db.execute(
       `SELECT 
         s.codigo_servidor, s.identificacao as folder_name,
@@ -198,6 +281,14 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
       });
     }
 
+    // Verificar compatibilidade do vídeo
+    const compatibility = isVideoCompatible(fileExtension, videoInfo.bitrate, userBitrateLimit);
+    
+    console.log(`🔍 Compatibilidade do vídeo:`, {
+      isCompatible: compatibility.isCompatible,
+      needsConversion: compatibility.needsConversion,
+      reasons: compatibility.reasons
+    });
     await SSHManager.createUserDirectory(serverId, userLogin);
     await SSHManager.createUserFolder(serverId, userLogin, folderName);
 
@@ -207,19 +298,31 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
 
     console.log(`✅ Arquivo enviado para: ${remotePath}`);
 
-    // Construir caminho relativo para salvar no banco
-    const relativePath = `${userLogin}/${folderName}/${req.file.filename}`;
-    console.log(`💾 Salvando no banco com path: ${relativePath}`);
-
-    // Nome do vídeo para salvar no banco
-    const videoTitle = req.file.originalname;
-
-    const [result] = await db.execute(
-      `INSERT INTO playlists_videos (
-        codigo_playlist, path_video, video, width, height,
-        bitrate, duracao, duracao_segundos, tipo, ordem, tamanho_arquivo
-      ) VALUES (0, ?, ?, 1920, 1080, 2500, ?, ?, 'video', 0, ?)`,
-      [relativePath, videoTitle, formatDuration(duracao), duracao, tamanho]
+    // Salvar vídeo na tabela videos
+    const [videoResult] = await db.execute(
+      `INSERT INTO videos (
+        codigo_cliente, nome, caminho, tamanho_arquivo, duracao_segundos,
+        bitrate_video, formato_original, largura, altura, codec_video,
+        is_mp4, compativel, motivos_incompatibilidade, pasta, servidor_id,
+        data_upload
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        userId,
+        req.file.originalname,
+        `${userLogin}/${folderName}/${req.file.filename}`,
+        tamanho,
+        videoInfo.duration,
+        videoInfo.bitrate,
+        videoInfo.format,
+        videoInfo.width,
+        videoInfo.height,
+        videoInfo.codec,
+        fileExtension === '.mp4' ? 1 : 0,
+        compatibility.isCompatible ? 1 : 0,
+        JSON.stringify(compatibility.reasons),
+        folderName,
+        serverId
+      ]
     );
 
     await db.execute(
@@ -227,58 +330,27 @@ router.post('/upload', authMiddleware, upload.single('video'), async (req, res) 
       [spaceMB, folderId]
     );
 
-    console.log(`✅ Vídeo salvo no banco com ID: ${result.insertId}`);
+    console.log(`✅ Vídeo salvo no banco com ID: ${videoResult.insertId}`);
 
-    // Construir URLs do Wowza para resposta
-    const isProduction = process.env.NODE_ENV === 'production';
-    const wowzaHost = isProduction ? 'samhost.wcore.com.br' : '51.222.156.223';
-
-    // Verificar se precisa converter para MP4
-    const needsConversion = !['.mp4'].includes(fileExtension);
-
-    let finalFileName = req.file.filename;
-    let finalRemotePath = remotePath;
-
-    // Se precisa converter, fazer conversão para MP4
-    if (needsConversion) {
-      const mp4FileName = req.file.filename.replace(/\.[^/.]+$/, '.mp4');
-      const mp4RemotePath = `/usr/local/WowzaStreamingEngine/content/${userLogin}/${folderName}/${mp4FileName}`;
-
-      console.log(`🔄 Convertendo ${req.file.filename} para MP4...`);
-
-      // Comando FFmpeg para conversão
-      const ffmpegCommand = `ffmpeg -i "${remotePath}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k -movflags +faststart "${mp4RemotePath}" -y 2>/dev/null && echo "CONVERSION_SUCCESS" || echo "CONVERSION_ERROR"`;
-
-      try {
-        const conversionResult = await SSHManager.executeCommand(serverId, ffmpegCommand);
-
-        if (conversionResult.stdout.includes('CONVERSION_SUCCESS')) {
-          console.log(`✅ Conversão concluída: ${mp4FileName}`);
-          finalFileName = mp4FileName;
-          finalRemotePath = mp4RemotePath;
-        } else {
-          console.warn(`⚠️ Conversão falhou, usando arquivo original: ${req.file.filename}`);
-        }
-      } catch (conversionError) {
-        console.warn('Erro na conversão, usando arquivo original:', conversionError.message);
-      }
-    }
-
-    // Construir URLs corretas
-    const finalRelativePath = `${userLogin}/${folderName}/${finalFileName}`;
-    const mp4Url = finalRelativePath;
-    const hlsUrl = `http://${wowzaHost}:1935/vod/_definst_/mp4:${relativePath}/playlist.m3u8`;
-
+    // Construir URL relativa
+    const relativePath = `${userLogin}/${folderName}/${req.file.filename}`;
     res.status(201).json({
-      id: result.insertId,
-      nome: videoTitle,
-      url: finalRelativePath, // Usar caminho relativo
-      hlsUrl: hlsUrl,
-      path: finalRemotePath,
-      originalFile: remotePath,
-      converted: needsConversion,
-      duracao,
-      tamanho
+      id: videoResult.insertId,
+      nome: req.file.originalname,
+      url: relativePath,
+      path: remotePath,
+      duracao: videoInfo.duration,
+      tamanho: tamanho,
+      bitrate_video: videoInfo.bitrate,
+      formato_original: videoInfo.format,
+      largura: videoInfo.width,
+      altura: videoInfo.height,
+      codec_video: videoInfo.codec,
+      is_mp4: fileExtension === '.mp4',
+      compativel: compatibility.isCompatible,
+      motivos_incompatibilidade: compatibility.reasons,
+      needs_conversion: compatibility.needsConversion,
+      can_use_in_playlist: compatibility.isCompatible
     });
   } catch (err) {
     console.error('Erro no upload:', err);
@@ -353,33 +425,26 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     const userId = req.user.id;
     const userLogin = req.user.email.split('@')[0];
 
-    // Buscar dados da playlist e vídeo associado
+    // Buscar dados do vídeo na tabela videos
     const [videoRows] = await db.execute(
-      'SELECT path_video, video, tamanho_arquivo, codigo_video FROM playlists_videos WHERE codigo = ?',
-      [videoId]
+      'SELECT caminho, nome, tamanho_arquivo, pasta, servidor_id FROM videos WHERE codigo = ? AND codigo_cliente = ?',
+      [videoId, userId]
     );
+    
     if (videoRows.length === 0) {
-      return res.status(404).json({ error: 'Vídeo não encontrado na playlist' });
+      return res.status(404).json({ error: 'Vídeo não encontrado' });
     }
 
-    const { path_video, tamanho_arquivo, codigo_video } = videoRows[0];
+    const { caminho, nome, tamanho_arquivo, pasta, servidor_id } = videoRows[0];
 
-    if (!path_video.includes(`/${userLogin}/`)) {
+    if (!caminho.includes(`/${userLogin}/`)) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
 
-    // Buscar servidor para execução via SSH
-    const [serverRows] = await db.execute(
-      `SELECT s.codigo_servidor 
-       FROM streamings s 
-       WHERE s.codigo_cliente = ? 
-       LIMIT 1`,
-      [userId]
-    );
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
+    const serverId = servidor_id || 1;
+    const remotePath = `/usr/local/WowzaStreamingEngine/content/${caminho}`;
 
     let fileSize = tamanho_arquivo || 0;
-    const remotePath = `/usr/local/WowzaStreamingEngine/content${path_video}`;
 
     // Verificar tamanho real do arquivo via SSH, se necessário
     if (!fileSize) {
@@ -399,37 +464,20 @@ router.delete('/:id', authMiddleware, async (req, res) => {
       console.warn('Erro ao deletar arquivo remoto:', err.message);
     }
 
-    // Remover entradas do banco de dados
-    await db.execute('DELETE FROM playlists_videos WHERE codigo = ?', [videoId]);
-
-    // Verificar se o vídeo ainda está em outras playlists
-    const [remainingRefs] = await db.execute(
-      'SELECT COUNT(*) as total FROM playlists_videos WHERE codigo_video = ?',
-      [codigo_video]
+    // Remover vídeo da tabela videos
+    await db.execute('DELETE FROM videos WHERE codigo = ?', [videoId]);
+    
+    // Remover vídeo de todas as playlists que o referenciam
+    await db.execute('DELETE FROM playlists_videos WHERE codigo_video = ?', [videoId]);
+    
+    // Atualizar espaço usado na pasta
+    const spaceMB = Math.ceil(fileSize / (1024 * 1024));
+    await db.execute(
+      'UPDATE streamings SET espaco_usado = GREATEST(espaco_usado - ?, 0) WHERE codigo_cliente = ? AND identificacao = ?',
+      [spaceMB, userId, pasta]
     );
-
-    if (remainingRefs[0].total === 0) {
-      // O vídeo não está mais em nenhuma playlist, remover da tabela principal
-      const [videoInfoRows] = await db.execute(
-        'SELECT caminho, tamanho_arquivo FROM videos WHERE codigo = ?',
-        [codigo_video]
-      );
-
-      if (videoInfoRows.length > 0) {
-        const { caminho, tamanho_arquivo } = videoInfoRows[0];
-        const filePath = path.resolve(__dirname, '..', 'videos', caminho);
-        const spaceMB = Math.ceil((tamanho_arquivo || fileSize) / (1024 * 1024));
-
-        // Deletar arquivo local se existir
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-          console.log(`🗑️ Arquivo local deletado: ${filePath}`);
-        }
-
-        await db.execute('DELETE FROM videos WHERE codigo = ?', [codigo_video]);
-        console.log(`📊 Espaço liberado: ${spaceMB}MB`);
-      }
-    }
+    
+    console.log(`📊 Espaço liberado: ${spaceMB}MB da pasta ${pasta}`);
 
     return res.json({ success: true, message: 'Vídeo removido com sucesso' });
   } catch (err) {
