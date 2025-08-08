@@ -21,8 +21,8 @@ router.get('/videos', authMiddleware, async (req, res) => {
     const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
     const { folder_id } = req.query;
 
-    let whereClause = 'WHERE path_video LIKE ?';
-    const params = [`%/${userLogin}/%`];
+    let whereClause = 'WHERE codigo_cliente = ?';
+    const params = [userId];
 
     if (folder_id) {
       // Buscar nome da pasta
@@ -33,36 +33,40 @@ router.get('/videos', authMiddleware, async (req, res) => {
 
       if (folderRows.length > 0) {
         const folderName = folderRows[0].identificacao;
-        whereClause += ' AND path_video LIKE ?';
-        params.push(`%/${userLogin}/${folderName}/%`);
+        whereClause += ' AND pasta = ?';
+        params.push(folderName);
       }
     }
 
     const [rows] = await db.execute(
       `SELECT 
         codigo as id,
-        video as nome,
-        path_video as url,
+        nome,
+        caminho as url,
         duracao_segundos as duracao,
         tamanho_arquivo as tamanho,
         bitrate_video,
         formato_original,
-        status_conversao,
-        path_video_mp4,
-        data_conversao
-       FROM playlists_videos 
+        largura,
+        altura,
+        codec_video,
+        is_mp4,
+        compativel,
+        motivos_incompatibilidade,
+        data_upload
+       FROM videos 
        ${whereClause}
-       ORDER BY codigo DESC`,
+       ORDER BY data_upload DESC`,
       params
     );
 
     // Processar TODOS os vídeos para mostrar opções de conversão
     const videos = rows.map(video => {
-      const fileName = path.basename(video.url);
-      const fileExtension = path.extname(fileName).toLowerCase();
-      const isMP4 = fileExtension === '.mp4';
+      const isMP4 = video.is_mp4 === 1;
       const currentBitrate = video.bitrate_video || 0;
       const userBitrateLimit = req.user.bitrate || 2500;
+      const motivos = video.motivos_incompatibilidade ? 
+        JSON.parse(video.motivos_incompatibilidade) : [];
       
       // Determinar quais qualidades estão disponíveis baseado no limite do usuário
       const availableQualities = [];
@@ -87,14 +91,14 @@ router.get('/videos', authMiddleware, async (req, res) => {
       
       return {
         ...video,
-        formato_original: video.formato_original || fileExtension.substring(1),
+        motivos_incompatibilidade: motivos,
         is_mp4: isMP4,
         current_bitrate: currentBitrate,
         user_bitrate_limit: userBitrateLimit,
         available_qualities: availableQualities,
-        can_use_current: currentBitrate <= userBitrateLimit,
-        needs_conversion: !isMP4 || currentBitrate > userBitrateLimit || !currentBitrate,
-        conversion_status: video.status_conversao || 'nao_iniciada'
+        can_use_current: video.compativel === 1,
+        needs_conversion: video.compativel === 0,
+        conversion_status: 'nao_iniciada'
       };
     });
 
@@ -159,8 +163,8 @@ router.post('/convert', authMiddleware, async (req, res) => {
 
     // Buscar vídeo
     const [videoRows] = await db.execute(
-      'SELECT * FROM playlists_videos WHERE codigo = ?',
-      [video_id]
+      'SELECT * FROM videos WHERE codigo = ? AND codigo_cliente = ?',
+      [video_id, userId]
     );
 
     if (videoRows.length === 0) {
@@ -172,32 +176,11 @@ router.post('/convert', authMiddleware, async (req, res) => {
 
     const video = videoRows[0];
 
-    // Verificar se o vídeo pertence ao usuário
-    if (!video.path_video.includes(`/${userLogin}/`)) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Acesso negado ao vídeo' 
-      });
-    }
-
     // Buscar servidor do usuário
-    const [serverRows] = await db.execute(
-      'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-      [userId]
-    );
-
-    const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-    // Marcar como em conversão
-    await db.execute(
-      'UPDATE playlists_videos SET status_conversao = "em_andamento" WHERE codigo = ?',
-      [video_id]
-    );
+    const serverId = video.servidor_id || 1;
 
     // Construir caminhos
-    const inputPath = video.path_video.startsWith('/usr/local/WowzaStreamingEngine/content/') ? 
-      video.path_video : `/usr/local/WowzaStreamingEngine/content${video.path_video}`;
-    
+    const inputPath = `/usr/local/WowzaStreamingEngine/content/${video.caminho}`;
     const fileName = path.basename(inputPath);
     const directory = path.dirname(inputPath);
     const nameWithoutExt = path.parse(fileName).name;
@@ -237,16 +220,33 @@ router.post('/convert', authMiddleware, async (req, res) => {
           }
         }
 
-        // Atualizar banco de dados
-        await db.execute(
-          `UPDATE playlists_videos SET 
-           status_conversao = "concluida",
-           path_video_mp4 = ?,
-           bitrate_video = ?,
-           duracao_segundos = ?,
-           data_conversao = NOW()
-           WHERE codigo = ?`,
-          [outputPath, realBitrate, realDuration, video_id]
+        // Criar novo vídeo convertido na tabela videos
+        const convertedFileName = `${nameWithoutExt}${qualitySuffix}.mp4`;
+        const convertedPath = `${video.caminho.split('/').slice(0, -1).join('/')}/${convertedFileName}`;
+        
+        const [newVideoResult] = await db.execute(
+          `INSERT INTO videos (
+            codigo_cliente, nome, caminho, tamanho_arquivo, duracao_segundos,
+            bitrate_video, formato_original, largura, altura, codec_video,
+            is_mp4, compativel, motivos_incompatibilidade, pasta, servidor_id,
+            video_original_id, qualidade_conversao, data_upload
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, '[]', ?, ?, ?, ?, NOW())`,
+          [
+            userId,
+            convertedFileName,
+            convertedPath,
+            newSize,
+            realDuration,
+            realBitrate,
+            'mp4',
+            video.largura,
+            video.altura,
+            'h264',
+            video.pasta,
+            serverId,
+            video_id,
+            quality || 'custom'
+          ]
         );
 
         console.log(`✅ Conversão concluída: ${fileName} -> ${quality || 'custom'} (${realBitrate} kbps)`);
@@ -255,8 +255,8 @@ router.post('/convert', authMiddleware, async (req, res) => {
           success: true,
           message: `Vídeo convertido com sucesso para qualidade ${quality || 'customizada'}!`,
           converted_video: {
-            id: video_id,
-            path_mp4: outputPath,
+            id: newVideoResult.insertId,
+            path: outputPath,
             bitrate: realBitrate,
             duration: realDuration,
             quality: quality || 'custom'
@@ -268,12 +268,6 @@ router.post('/convert', authMiddleware, async (req, res) => {
     } catch (conversionError) {
       console.error('Erro na conversão:', conversionError);
       
-      // Marcar como erro
-      await db.execute(
-        'UPDATE playlists_videos SET status_conversao = "erro" WHERE codigo = ?',
-        [video_id]
-      );
-
       res.status(500).json({
         success: false,
         error: 'Erro na conversão do vídeo',
@@ -295,20 +289,19 @@ router.get('/status/:video_id', authMiddleware, async (req, res) => {
   try {
     const { video_id } = req.params;
     const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
 
     const [rows] = await db.execute(
       `SELECT 
         codigo as id,
-        video as nome,
-        status_conversao,
+        nome,
         bitrate_video,
-        path_video_mp4,
-        data_conversao,
-        formato_original
-       FROM playlists_videos 
-       WHERE codigo = ? AND path_video LIKE ?`,
-      [video_id, `%/${userLogin}/%`]
+        formato_original,
+        compativel,
+        qualidade_conversao,
+        data_upload
+       FROM videos 
+       WHERE codigo = ? AND codigo_cliente = ?`,
+      [video_id, userId]
     );
 
     if (rows.length === 0) {
@@ -325,10 +318,9 @@ router.get('/status/:video_id', authMiddleware, async (req, res) => {
       conversion_status: {
         id: video.id,
         nome: video.nome,
-        status: video.status_conversao || 'nao_iniciada',
+        status: video.compativel ? 'concluida' : 'nao_iniciada',
         bitrate: video.bitrate_video,
-        mp4_path: video.path_video_mp4,
-        converted_at: video.data_conversao,
+        converted_at: video.data_upload,
         original_format: video.formato_original
       }
     });
@@ -377,12 +369,11 @@ router.delete('/:video_id', authMiddleware, async (req, res) => {
   try {
     const { video_id } = req.params;
     const userId = req.user.id;
-    const userLogin = req.user.email ? req.user.email.split('@')[0] : `user_${userId}`;
 
     // Buscar vídeo
     const [videoRows] = await db.execute(
-      'SELECT path_video_mp4 FROM playlists_videos WHERE codigo = ? AND path_video LIKE ?',
-      [video_id, `%/${userLogin}/%`]
+      'SELECT caminho, servidor_id, video_original_id FROM videos WHERE codigo = ? AND codigo_cliente = ?',
+      [video_id, userId]
     );
 
     if (videoRows.length === 0) {
@@ -394,32 +385,34 @@ router.delete('/:video_id', authMiddleware, async (req, res) => {
 
     const video = videoRows[0];
 
-    if (video.path_video_mp4) {
-      // Buscar servidor do usuário
-      const [serverRows] = await db.execute(
-        'SELECT codigo_servidor FROM streamings WHERE codigo_cliente = ? LIMIT 1',
-        [userId]
-      );
-
-      const serverId = serverRows.length > 0 ? serverRows[0].codigo_servidor : 1;
-
-      // Remover arquivo MP4 convertido do servidor
-      try {
-        await SSHManager.deleteFile(serverId, video.path_video_mp4);
-        console.log(`✅ Arquivo MP4 convertido removido: ${video.path_video_mp4}`);
-      } catch (fileError) {
-        console.warn('Erro ao remover arquivo MP4:', fileError.message);
-      }
+    // Verificar se é um vídeo convertido (tem video_original_id)
+    if (!video.video_original_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Este não é um vídeo convertido'
+      });
     }
 
-    // Limpar dados de conversão no banco
+    const serverId = video.servidor_id || 1;
+    const remotePath = `/usr/local/WowzaStreamingEngine/content/${video.caminho}`;
+
+    // Remover arquivo convertido do servidor
+    try {
+      await SSHManager.deleteFile(serverId, remotePath);
+      console.log(`✅ Arquivo convertido removido: ${remotePath}`);
+    } catch (fileError) {
+      console.warn('Erro ao remover arquivo convertido:', fileError.message);
+    }
+
+    // Remover vídeo convertido do banco
     await db.execute(
-      `UPDATE playlists_videos SET 
-       status_conversao = NULL,
-       path_video_mp4 = NULL,
-       bitrate_video = NULL,
-       data_conversao = NULL
-       WHERE codigo = ?`,
+      'DELETE FROM videos WHERE codigo = ?',
+      [video_id]
+    );
+    
+    // Remover de playlists se estiver sendo usado
+    await db.execute(
+      'DELETE FROM playlists_videos WHERE codigo_video = ?',
       [video_id]
     );
 

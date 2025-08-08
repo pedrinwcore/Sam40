@@ -350,18 +350,12 @@ const ConversaoVideos: React.FC = () => {
       return 'Convertendo...';
     }
 
-    switch (video.status_conversao) {
-      case 'concluida':
-        return 'Convertido';
-      case 'em_andamento':
-        return 'Convertendo...';
-      case 'erro':
-        return 'Erro na conversão';
-      default:
-        if (video.is_mp4 && video.can_use_current) {
-          return 'MP4 Original';
-        }
-        return 'Disponível para conversão';
+    if (video.is_mp4 && video.can_use_current) {
+      return 'MP4 Compatível';
+    } else if (video.is_mp4 && !video.can_use_current) {
+      return 'MP4 - Bitrate Alto';
+    } else {
+      return 'Precisa Conversão';
     }
   };
 
@@ -370,18 +364,12 @@ const ConversaoVideos: React.FC = () => {
       return 'text-blue-600';
     }
 
-    switch (video.status_conversao) {
-      case 'concluida':
-        return 'text-green-600';
-      case 'em_andamento':
-        return 'text-blue-600';
-      case 'erro':
-        return 'text-red-600';
-      default:
-        if (video.is_mp4 && video.can_use_current) {
-          return 'text-green-600';
-        }
-        return 'text-yellow-600';
+    if (video.is_mp4 && video.can_use_current) {
+      return 'text-green-600';
+    } else if (video.needs_conversion) {
+      return 'text-red-600';
+    } else {
+      return 'text-yellow-600';
     }
   };
 
@@ -396,8 +384,8 @@ const ConversaoVideos: React.FC = () => {
   };
 
   const totalVideos = videos.length;
-  const needsConversion = videos.filter(v => v.needs_conversion && v.status_conversao !== 'concluida').length;
-  const convertedVideos = videos.filter(v => v.status_conversao === 'concluida').length;
+  const needsConversion = videos.filter(v => v.needs_conversion).length;
+  const compatibleVideos = videos.filter(v => v.can_use_current).length;
   const mp4Videos = videos.filter(v => v.is_mp4 && v.can_use_current).length;
 
   return (
@@ -458,8 +446,8 @@ const ConversaoVideos: React.FC = () => {
               <Zap className="h-6 w-6 text-purple-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">Convertidos</p>
-              <p className="text-2xl font-bold text-gray-900">{convertedVideos}</p>
+              <p className="text-sm font-medium text-gray-500">Compatíveis</p>
+              <p className="text-2xl font-bold text-gray-900">{compatibleVideos}</p>
             </div>
           </div>
         </div>
@@ -560,11 +548,11 @@ const ConversaoVideos: React.FC = () => {
                     <td className="py-3 px-4 text-center">
                       <div className="flex flex-col items-center">
                         <span className={`font-medium ${
-                          (video.bitrate_original || video.current_bitrate) > video.user_bitrate_limit ? 'text-red-600' : 'text-gray-900'
+                          video.current_bitrate > video.user_bitrate_limit ? 'text-red-600' : 'text-gray-900'
                         }`}>
-                          {video.bitrate_original || video.current_bitrate || 'N/A'} kbps
+                          {video.current_bitrate || 'N/A'} kbps
                         </span>
-                        {(video.bitrate_original || video.current_bitrate) > video.user_bitrate_limit && (
+                        {video.current_bitrate > video.user_bitrate_limit && (
                           <span className="text-xs text-red-600">
                             Limite: {video.user_bitrate_limit} kbps
                           </span>
@@ -583,6 +571,13 @@ const ConversaoVideos: React.FC = () => {
                           {getStatusText(video)}
                         </span>
                       </div>
+                      {video.needs_conversion && video.motivos_incompatibilidade && (
+                        <div className="mt-1 text-xs text-red-600">
+                          {video.motivos_incompatibilidade.map((motivo, idx) => (
+                            <div key={idx}>• {motivo}</div>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     
                     <td className="py-3 px-4 text-center">
@@ -597,22 +592,12 @@ const ConversaoVideos: React.FC = () => {
                         
                         <button
                           onClick={() => openConversionModal(video)}
-                          disabled={converting[video.id] || video.status_conversao === 'em_andamento'}
+                          disabled={converting[video.id] || video.can_use_current}
                           className="text-purple-600 hover:text-purple-800 disabled:opacity-50 p-1"
-                          title="Converter vídeo"
+                          title={video.can_use_current ? "Vídeo já compatível" : "Converter vídeo"}
                         >
                           <Settings className="h-4 w-4" />
                         </button>
-                        
-                        {video.status_conversao === 'concluida' && (
-                          <button
-                            onClick={() => removeConversion(video.id)}
-                            className="text-red-600 hover:text-red-800 p-1"
-                            title="Remover conversão"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        )}
                       </div>
                     </td>
                   </tr>
@@ -894,10 +879,11 @@ const ConversaoVideos: React.FC = () => {
             <h3 className="text-blue-900 font-medium mb-2">Sistema de Conversão Avançado</h3>
             <ul className="text-blue-800 text-sm space-y-1">
               <li>• <strong>Todos os vídeos</strong> são listados, independente do formato</li>
+              <li>• <strong>Vídeos incompatíveis</strong> aparecem em vermelho com os motivos</li>
               <li>• <strong>Qualidades predefinidas:</strong> Baixa (480p), Média (720p), Alta (1080p), Full HD (1080p+)</li>
               <li>• <strong>Configuração customizada:</strong> Defina bitrate e resolução específicos</li>
               <li>• <strong>Limite respeitado:</strong> Apenas qualidades dentro do seu plano são permitidas</li>
-              <li>• <strong>MP4 originais:</strong> Podem ser reconvertidos para diferentes qualidades</li>
+              <li>• <strong>MP4 compatíveis:</strong> Podem ser usados diretamente em playlists</li>
               <li>• <strong>Player HTML5:</strong> Visualização direta de todos os vídeos</li>
               <li>• <strong>Conversão inteligente:</strong> Preserva qualidade visual otimizando tamanho</li>
             </ul>

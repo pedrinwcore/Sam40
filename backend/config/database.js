@@ -51,11 +51,15 @@ async function testConnection() {
         motivos_incompatibilidade JSON,
         pasta VARCHAR(255),
         servidor_id INT DEFAULT 1,
+        video_original_id INT NULL,
+        qualidade_conversao VARCHAR(50) NULL,
         data_upload TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_cliente_pasta (codigo_cliente, pasta),
         INDEX idx_compativel (compativel),
-        INDEX idx_upload (data_upload)
+        INDEX idx_upload (data_upload),
+        INDEX idx_original (video_original_id),
+        FOREIGN KEY (video_original_id) REFERENCES videos(codigo) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     
